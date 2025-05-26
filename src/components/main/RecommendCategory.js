@@ -6,6 +6,8 @@ import { Paper, Typography, Box, Button } from '@mui/material';
 const RecommendCategory = ({ categoryName, spendingCategory, totalSpending, baseDate }) => {
   const navigate = useNavigate();
 
+  
+
   return (
     <Paper 
       elevation={3} 
