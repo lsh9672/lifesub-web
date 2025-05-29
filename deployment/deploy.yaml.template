@@ -14,6 +14,8 @@ spec:
       labels:
         app: lifesub-web
     spec:
+      imagePullSecrets:
+      - name: acr-secret
       containers:
       - name: lifesub-web
         image: ${lifesub_web_image_path}
@@ -27,6 +29,29 @@ spec:
           limits:
             cpu: ${resources_limits_cpu}
             memory: ${resources_limits_memory}
+        volumeMounts:
+        - name: runtime-config
+          mountPath: /usr/share/nginx/html/runtime-env.js
+          subPath: runtime-env.js
+      volumes:
+      - name: runtime-config
+        configMap:
+          name: lifesub-web-config
+
+---
+# ConfigMap for Runtime Environment
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lifesub-web-config
+  namespace: ${namespace}
+data:
+  runtime-env.js: |
+    window.__runtime_config__ = {
+        MEMBER_URL: 'http://${ingress_host}/api/auth',
+        MYSUB_URL: 'http://${ingress_host}/api/mysub',
+        RECOMMEND_URL: 'http://${ingress_host}/api/recommend'
+    };
 
 ---
 # Frontend Service
