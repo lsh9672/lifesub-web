@@ -29,20 +29,24 @@ jobs:
     - name: Run tests with coverage
       run: npm test -- --coverage --passWithNoTests
     
+    - name: Setup SonarQube Scanner
+      uses: warchant/setup-sonar-scanner@v7
+    
     - name: SonarQube Scan
-      uses: sonarqube-scanner-action/sonarqube-scanner-action@v2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-      with:
-        args: >
-          -Dsonar.projectKey=lifesub-web-lifesub-web-dg0420
-          -Dsonar.projectName=lifesub-web-lifesub-web-dg0420
-          -Dsonar.sources=src
-          -Dsonar.tests=src
-          -Dsonar.test.inclusions=src/**/*.test.js,src/**/*.test.jsx
-          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+      run: |
+        sonar-scanner \
+          -Dsonar.projectKey=lifesub-web-lifesub-web-dg0420 \
+          -Dsonar.projectName=lifesub-web-lifesub-web-dg0420 \
+          -Dsonar.sources=src \
+          -Dsonar.tests=src \
+          -Dsonar.test.inclusions=src/**/*.test.js,src/**/*.test.jsx \
+          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
+          -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+          -Dsonar.login=${{ secrets.SONAR_TOKEN }}
     
     - name: Build application
       run: npm run build
