@@ -30,7 +30,7 @@ jobs:
       run: npm test -- --coverage --passWithNoTests
     
     - name: SonarQube Scan
-      uses: sonarqube-scanner-action@master
+      uses: sonarqube-scanner-action/sonarqube-scanner-action@v2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -67,3 +67,111 @@ jobs:
       run: |
         while IFS='=' read -r key value; do
           # Skip comments and empty lines
+          if [[ ! "$key" =~ ^#.*$ ]] && [[ -n "$key" ]] && [[ -n "$value" ]]; then
+            echo "$key=$value" >> $GITHUB_ENV
+          fi
+        done < deployment/deploy_env_vars
+    
+    - name: Generate image tag
+      id: generate-tag
+      run: |
+        IMAGE_TAG=$(date +'%Y%m%d%H%M%S')
+        echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-files
+        path: build/
+    
+    - name: Login to Azure Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.registry }}
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+    
+    - name: Build and push Docker image
+      run: |
+        echo "Building image for ${{ env.SERVICE_NAME }}..."
+        docker build \
+          --build-arg PROJECT_FOLDER="." \
+          --build-arg BUILD_FOLDER="deployment/container" \
+          --build-arg EXPORT_PORT="${{ env.export_port }}" \
+          -f deployment/container/Dockerfile-lifesub-web \
+          -t ${{ env.registry }}/${{ env.image_org }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} .
+        
+        echo "Pushing image for ${{ env.SERVICE_NAME }}..."
+        docker push ${{ env.registry }}/${{ env.image_org }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
+
+  deploy:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Read deployment environment variables
+      run: |
+        while IFS='=' read -r key value; do
+          # Skip comments and empty lines
+          if [[ ! "$key" =~ ^#.*$ ]] && [[ -n "$key" ]] && [[ -n "$value" ]]; then
+            echo "$key=$value" >> $GITHUB_ENV
+          fi
+        done < deployment/deploy_env_vars
+    
+    - name: Set image tag from release job
+      run: |
+        echo "IMAGE_TAG=${{ needs.release.outputs.image-tag }}" >> $GITHUB_ENV
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials --resource-group rg-digitalgarage-03 --name aks-digitalgarage-03 --overwrite-existing
+    
+    - name: Create namespace
+      run: |
+        kubectl create namespace ${{ env.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+    
+    - name: Generate Kubernetes manifests
+      run: |
+        # Set image path as environment variable
+        export lifesub_web_image_path="${{ env.registry }}/${{ env.image_org }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}"
+        
+        # Generate manifest from template
+        envsubst < deployment/deploy.yaml.template > deployment/deploy.yaml
+        
+        echo "=== Generated Manifest ==="
+        cat deployment/deploy.yaml
+        echo "=========================="
+    
+    - name: Deploy to AKS
+      run: |
+        kubectl apply -f deployment/deploy.yaml
+        
+        echo "Waiting for deployment to be ready..."
+        kubectl -n ${{ env.namespace }} wait --for=condition=available deployment/lifesub-web --timeout=300s
+        
+        echo "Waiting for service external IP..."
+        timeout 300s bash -c '
+        while [[ -z $(kubectl -n ${{ env.namespace }} get svc lifesub-web -o jsonpath="{.status.loadBalancer.ingress[0].ip}") ]]; do
+          echo "Waiting for external IP assignment..."
+          sleep 10
+        done'
+        
+        EXTERNAL_IP=$(kubectl -n ${{ env.namespace }} get svc lifesub-web -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        echo "======================="
+        echo "Frontend Deployment Completed!"
+        echo "Service External IP: $EXTERNAL_IP"
+        echo "Access URL: http://$EXTERNAL_IP"
+        echo "======================="
