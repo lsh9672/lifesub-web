@@ -96,6 +96,10 @@ podTemplate(
                         cd ${manifestDir}
                         git config user.name "Jenkins"
                         git config user.email "jenkins@example.com"
+                        
+                        # 파일 권한 설정
+                        find . -type f -name "*.yaml" -exec chmod 664 {} \\;
+                        find . -type d -exec chmod 755 {} \\;
                     """
                 }
             }
@@ -108,9 +112,28 @@ podTemplate(
                 
                 sh """
                     echo "Updating lifesub-web deployment manifest with image: ${newImage}"
-                    yq eval '.spec.template.spec.containers[0].image = "${newImage}"' -i ${manifestPath}
+                    
+                    # 파일 존재 여부 확인
+                    if [ ! -f ${manifestPath} ]; then
+                        echo "Error: Manifest file not found at ${manifestPath}"
+                        exit 1
+                    fi
+                    
+                    # 파일 권한 확인 및 설정
+                    chmod 664 ${manifestPath}
+                    
+                    # 백업 생성
+                    cp ${manifestPath} ${manifestPath}.backup
+                    
+                    # yq를 사용하여 이미지 업데이트
+                    yq eval '.spec.template.spec.containers[0].image = "${newImage}"' ${manifestPath} > ${manifestPath}.tmp
+                    mv ${manifestPath}.tmp ${manifestPath}
+                    
                     echo "Updated manifest:"
                     cat ${manifestPath}
+                    
+                    echo "Verifying update..."
+                    grep "${newImage}" ${manifestPath} && echo "✓ Image update verified" || echo "✗ Image update failed"
                 """
             }
         }
