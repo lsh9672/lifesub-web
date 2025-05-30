@@ -1,0 +1,146 @@
+def PIPELINE_ID = "${env.BUILD_NUMBER}"
+
+def getImageTag() {
+    def dateFormat = new java.text.SimpleDateFormat('yyyyMMddHHmmss')
+    def currentDate = new Date()
+    return dateFormat.format(currentDate)
+}
+
+podTemplate(
+    label: "${PIPELINE_ID}",
+    serviceAccount: 'jenkins',
+    containers: [
+        containerTemplate(name: 'node', image: 'node:20-slim', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'podman', image: "mgoltzsche/podman", ttyEnabled: true, command: 'cat', privileged: true),
+        containerTemplate(name: 'git', image: 'alpine/git:latest', command: 'cat', ttyEnabled: true),
+        containerTemplate(name: 'yq', image: 'mikefarah/yq:latest', command: 'cat', ttyEnabled: true),
+        containerTemplate(name: 'sonar-scanner', image: 'sonarsource/sonar-scanner-cli:latest', command: 'cat', ttyEnabled: true)
+    ],
+    volumes: [
+        emptyDirVolume(mountPath: '/opt/sonar-scanner/.sonar/cache', memory: false)
+    ]
+) {
+    node(PIPELINE_ID) {
+        def props
+        def imageTag = getImageTag()
+        def manifestRepo = 'https://github.com/lsh9672/lifesub-manifest.git'
+        def manifestDir = 'lifesub-manifest'
+        def sonarScannerHome = '/opt/sonar-scanner'
+
+        stage("Get Source") {
+            checkout scm
+            props = readProperties file: "deployment/deploy_env_vars"
+        }
+
+        stage('Code Analysis & Quality Gate') {
+            container('node') {
+                sh "npm install"
+                sh "npm test -- --coverage --passWithNoTests"
+            }
+            
+            container('sonar-scanner') {
+                withSonarQubeEnv('SonarQube') {
+                    sh """
+                        ${sonarScannerHome}/bin/sonar-scanner \
+                        -Dsonar.projectKey=lifesub-web-lifesub-web-dg0420 \
+                        -Dsonar.sources=src \
+                        -Dsonar.tests=src \
+                        -Dsonar.test.inclusions=src/**/*.test.js,src/**/*.test.jsx \
+                        -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+                    """
+                }
+            }
+            
+            timeout(time: 10, unit: 'MINUTES') {
+                def qg = waitForQualityGate()
+                if (qg.status != 'OK') {
+                    error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                }
+            }
+        }
+
+        stage('Build & Push Image') {
+            container('podman') {
+                withCredentials([usernamePassword(
+                    credentialsId: 'acr-credentials',
+                    usernameVariable: 'USERNAME',
+                    passwordVariable: 'PASSWORD'
+                )]) {
+                    def imagePath = "${props.registry}/${props.image_org}/lifesub-web:${imageTag}"
+                    
+                    sh """
+                        podman login ${props.registry} --username \$USERNAME --password \$PASSWORD
+
+                        podman build \
+                            --build-arg PROJECT_FOLDER="." \
+                            --build-arg BUILD_FOLDER="deployment/container" \
+                            --build-arg EXPORT_PORT="${props.export_port}" \
+                            -f deployment/container/Dockerfile-lifesub-web \
+                            -t ${imagePath} .
+                        
+                        podman push ${imagePath}
+                    """
+                }
+            }
+        }
+
+        stage('Clone Manifest Repository') {
+            container('git') {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-credentials-dg0415',
+                    usernameVariable: 'GIT_USERNAME',
+                    passwordVariable: 'GIT_PASSWORD'
+                )]) {
+                    sh """
+                        git clone https://\$GIT_USERNAME:\$GIT_PASSWORD@github.com/lsh9672/lifesub-manifest.git ${manifestDir}
+                        cd ${manifestDir}
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@example.com"
+                    """
+                }
+            }
+        }
+
+        stage('Update Manifest File') {
+            container('yq') {
+                def newImage = "${props.registry}/${props.image_org}/lifesub-web:${imageTag}"
+                def manifestPath = "${manifestDir}/lifesub-web/deployments/lifesub-web-deployment.yaml"
+                
+                sh """
+                    echo "Updating lifesub-web deployment manifest with image: ${newImage}"
+                    yq eval '.spec.template.spec.containers[0].image = "${newImage}"' -i ${manifestPath}
+                    echo "Updated manifest:"
+                    cat ${manifestPath}
+                """
+            }
+        }
+
+        stage('Commit and Push Changes') {
+            container('git') {
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-credentials-dg0415',
+                    usernameVariable: 'GIT_USERNAME',
+                    passwordVariable: 'GIT_PASSWORD'
+                )]) {
+                    sh """
+                        cd ${manifestDir}
+                        git add .
+                        git commit -m "Update lifesub-web image to ${imageTag} - Build #${env.BUILD_NUMBER}" || echo "No changes to commit"
+                        git push https://\$GIT_USERNAME:\$GIT_PASSWORD@github.com/lsh9672/lifesub-manifest.git main
+                    """
+                }
+            }
+        }
+
+        stage('Summary') {
+            echo """
+            ========================
+            Frontend Build Completed!
+            Image: ${props.registry}/${props.image_org}/lifesub-web:${imageTag}
+            Manifest repository updated with new image tag.
+            ArgoCD will automatically sync and deploy the changes.
+            ========================
+            """
+        }
+    }
+}
